@@ -42,11 +42,16 @@ impl Delimiter {
     }
 }
 
-pub trait Specialize {
+pub trait Specialize<T> {
     type Err;
-    type Out;
 
-    fn specialize(self) -> std::result::Result<Self::Out, Self::Err>;
+    fn specialize(self) -> std::result::Result<T, Self::Err>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Form {
+    Tall,
+    Wide,
 }
 
 #[derive(Clone, Debug)]
@@ -136,13 +141,13 @@ impl<'src, Atom> Parser<'src, Atom> {
             Err("expected a whitespace")?
         }
 
-        self.skip_while(|c| c.is_ascii_whitespace());
+        self.skip_while(char::is_ascii_whitespace);
 
         Ok(())
     }
 
     fn skip(&mut self) {
-        self.skip_while(|c| c.is_ascii_whitespace());
+        self.skip_while(char::is_ascii_whitespace);
     }
 
     fn peek_group_close(&mut self, delimiter: Delimiter) -> Option<()> {
@@ -246,32 +251,88 @@ impl<'src, Atom> Parser<'src, Atom> {
         let rule = match self.rules.get(rule_str).cloned() {
             Some(value) => value,
             None => {
-                let atom = (*self.atom_parser)(&self.src[self.start..self.index]);
-                return Ok(Tree::Atom(atom?));
+                let atom = (*self.atom_parser)(&self.src[self.start..self.index])?;
+                println!("parse atom");
+                return Ok(Tree::Atom(atom));
             }
         };
 
+        println!("rule {rule_str}");
+        let form = if self.consume('(') {
+            Form::Wide
+        } else {
+            Form::Tall
+        };
+        println!("form = {form:?}");
+
         let mut arguments = vec![];
 
-        for _ in 0..rule.arguments {
-            self.gap()?;
+        for i in 0..rule.arguments {
+            println!("arg {i}");
+            match form {
+                Form::Tall => self.gap()?,
+                // Form::Wide if i >= rule.arguments - 1 => self.skip(),
+                Form::Wide if i != 0 => self.at_least_one_whitespace()?,
+                Form::Wide => (),
+            }
             arguments.push(self.parse(false)?);
+        }
+        println!("here");
+
+        if self.peek().is_some_and(|c| *c == ')') {
+            self.advance();
+            println!("leave {rule_str} wide");
+            return Ok(Tree::Tree {
+                rule,
+                arguments,
+                varargs: vec![],
+            });
         }
 
         let mut varargs = vec![];
+        let mut first = true;
 
         if rule.variadic {
             loop {
-                self.gap()?;
-                if self.peek_terminator().is_some() {
+                if self.peek().is_some_and(|c| *c == ')') {
                     break;
                 }
+
+                match form {
+                    Form::Tall => self.gap()?,
+                    Form::Wide if !first => self.at_least_one_whitespace()?,
+                    Form::Wide => (),
+                }
+
+                first = false;
+
+                let should_stop = match form {
+                    Form::Tall => self.peek_terminator().is_some(),
+                    Form::Wide => self.peek().is_some_and(|c| *c == ')'),
+                };
+                if should_stop {
+                    break;
+                }
+
                 varargs.push(self.parse(false)?);
             }
 
-            self.parse_terminator()?;
+            match form {
+                Form::Tall => self.parse_terminator()?,
+                Form::Wide => self
+                    .advance()
+                    .filter(|c| *c == ')')
+                    .map(|_| ())
+                    .ok_or("unexpected char".to_string())?,
+            }
+        } else if form == Form::Wide {
+            self.advance()
+                .filter(|c| *c == ')')
+                .map(|_| ())
+                .ok_or("unexpected char".to_string())?
         }
 
+        println!("leave {rule_str}");
         Ok(Tree::Tree {
             rule,
             arguments,
@@ -328,6 +389,8 @@ mod test {
             +  1  2
             3
           (1 2 3)
+          +(3 4)
+          do(1 2 3)
         ;;
         "#;
 
