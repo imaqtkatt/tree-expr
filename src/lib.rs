@@ -24,6 +24,24 @@ pub enum Delimiter {
     Braces,
 }
 
+impl Delimiter {
+    pub(crate) const fn open_char(self) -> char {
+        match self {
+            Delimiter::Parentheses => '(',
+            Delimiter::Brackets => '[',
+            Delimiter::Braces => '{',
+        }
+    }
+
+    pub(crate) const fn close_char(self) -> char {
+        match self {
+            Delimiter::Parentheses => ')',
+            Delimiter::Brackets => ']',
+            Delimiter::Braces => '}',
+        }
+    }
+}
+
 pub trait Specialize {
     type Err;
     type Out;
@@ -58,7 +76,7 @@ pub struct Parser<'src, Atom> {
 type ParseResult<T> = std::result::Result<T, String>;
 
 impl<'src, Atom> Parser<'src, Atom> {
-    const RESTRICT: &'static str = "()[]{} \n";
+    const RESTRICT: &'static str = ";()[]{} \n\t\r";
 
     pub fn new(
         rules: BTreeMap<String, Rule>,
@@ -83,11 +101,18 @@ impl<'src, Atom> Parser<'src, Atom> {
         self.peekable.peek()
     }
 
+    pub fn consume(&mut self, c: char) -> bool {
+        if self.peek().is_some_and(|c_| *c_ == c) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn advance(&mut self) -> Option<char> {
         let c = self.peekable.next()?;
-
         self.index += c.len_utf8();
-
         Some(c)
     }
 
@@ -121,13 +146,20 @@ impl<'src, Atom> Parser<'src, Atom> {
     }
 
     fn peek_group_close(&mut self, delimiter: Delimiter) -> Option<()> {
+        let expected = delimiter.close_char();
         let c = self.peek()?;
 
-        match delimiter {
-            Delimiter::Parentheses if *c == ')' => Some(()),
-            Delimiter::Brackets if *c == ']' => Some(()),
-            Delimiter::Braces if *c == '}' => Some(()),
-            _ => None,
+        if *c == expected { Some(()) } else { None }
+    }
+
+    fn parse_group_close(&mut self, delimiter: Delimiter) -> ParseResult<()> {
+        let expected = delimiter.close_char();
+        let a = self.advance().ok_or("reached eof")?;
+
+        if a == expected {
+            Ok(())
+        } else {
+            Err(format!("expected '{expected}' but found '{a}'"))
         }
     }
 
@@ -197,7 +229,7 @@ impl<'src, Atom> Parser<'src, Atom> {
             children.push(self.parse(false)?);
         }
 
-        self.advance();
+        self.parse_group_close(delimiter)?;
 
         Ok(Tree::Group {
             delimiter,
@@ -255,10 +287,15 @@ impl<'src, Atom> Parser<'src, Atom> {
             self.save();
         }
 
+        if self.peek_terminator().is_some() {
+            Err("unexpected terminator")?
+        }
+
         let c = self.peek();
 
         if let Some(c) = c {
             match c {
+                ')' | ']' | '}' => Err("unexpected delimiter".to_string()),
                 '(' | '[' | '{' => self.parse_group(),
                 _ => self.parse_rule(),
             }
@@ -287,7 +324,7 @@ mod test {
 
         let src = r#"
         do
-          + 
+          +
             +  1  2
             3
           (1 2 3)
@@ -297,7 +334,7 @@ mod test {
         let mut parser = Parser::new(rules, atom_parser, src);
         match parser.parse(true) {
             Ok(tree) => println!("{tree:#?}"),
-            Err(e) => eprintln!("{e}"),
+            Err(e) => panic!("{e}"),
         }
     }
 }
